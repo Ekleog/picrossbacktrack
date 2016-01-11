@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::cmp;
+use std::collections::HashMap;
 use std::fs::*;
 use std::io::BufReader;
 use std::io::BufRead;
@@ -111,15 +113,26 @@ impl<'a> Iterator for PicrossRowGenerator<'a> {
     }
 }
 
+thread_local!(static PICROSS_ROWS_CACHE: RefCell<HashMap<(usize, Vec<usize>), Vec<Vec<Cell>>>> = RefCell::new(HashMap::new()));
 /// Returns an iterator yielding all possible picross rows following the given constraints :
 /// row_size: size of the row
 /// spec: specification of the blocks : &vec![1,2] means a one-cell block and a two-cell block
-fn gen_picross_rows<'a>(row_size: usize, spec: &'a Vec<usize>) -> PicrossRowGenerator {
-    PicrossRowGenerator {
-        row_size: row_size,
-        spec: spec,
-        inc_series_gen: gen_increasing_series(spec.len(), row_size + 1 - spec.iter().fold(0, |sum, x| sum + x))
-    }
+fn gen_picross_rows(row_size: usize, spec: &Vec<usize>) -> &Vec<Vec<Cell>> {
+    PICROSS_ROWS_CACHE.with(|cache| {
+        let cache = cache.borrow_mut();
+        let cached = cache.get(&(row_size, spec.clone()));
+        if let Some(cached) = cached {
+            cached
+        } else {
+            let new = PicrossRowGenerator {
+                row_size: row_size,
+                spec: &spec,
+                inc_series_gen: gen_increasing_series(spec.len(), row_size + 1 - spec.iter().fold(0, |sum, x| sum + x))
+            }.collect::<Vec<Vec<Cell>>>();
+            cache.insert((row_size, spec.clone()), new);
+            &new
+        }
+    })
 }
 
 fn is_consistent(picross: &Picross) -> bool {
@@ -179,8 +192,8 @@ fn is_row_consistent_with(old: &Vec<Cell>, new: &Vec<Cell>) -> bool {
         })
 }
 
-fn gcd<T> (start_row: &Vec<Cell>, mut possible_rows: T) -> (Vec<Cell>, bool) where T: Iterator<Item=Vec<Cell>> {
-    let mut gcd = possible_rows.find(|row| is_row_consistent_with(start_row, row)).expect("No solution to this picross");
+fn gcd<'a, T> (start_row: &Vec<Cell>, mut possible_rows: T) -> (Vec<Cell>, bool) where T: Iterator<Item=&'a Vec<Cell>> {
+    let mut gcd = possible_rows.find(|row| is_row_consistent_with(start_row, row)).expect("No solution to this picross").clone();
     for row in possible_rows {
         if is_row_consistent_with(start_row, &row) {
             for pair in (&mut gcd).iter_mut().zip(row.iter()) {
@@ -198,7 +211,7 @@ fn gcd<T> (start_row: &Vec<Cell>, mut possible_rows: T) -> (Vec<Cell>, bool) whe
 fn combex_rows(picross: &mut Picross, w: &mut RenderWindow) -> bool {
     let mut dirty = false;
     for (row, spec) in (0..picross.cells.len()).zip(picross.row_spec.iter()) {
-        let res = gcd(&picross.cells[row], gen_picross_rows(picross.length, spec));
+        let res = gcd(&picross.cells[row], gen_picross_rows(picross.length, spec).iter());
         picross.cells[row] = res.0;
         dirty |= res.1;
         if res.1 {
@@ -212,7 +225,7 @@ fn combex_cols(picross: &mut Picross, w: &mut RenderWindow) -> bool {
     let mut dirty = false;
     let col_spec = picross.col_spec.iter().cloned().collect::<Vec<Vec<usize>>>();
     for (i, (column, spec)) in picross.transpose().iter().zip(col_spec).enumerate() {
-        let res = gcd(&column, gen_picross_rows(picross.height, &spec));
+        let res = gcd(&column, gen_picross_rows(picross.height, &spec).iter());
         picross.set_col(i, res.0);
         dirty |= res.1;
         if res.1 {
